@@ -1,0 +1,52 @@
+# ==============================================================================
+# 3D-GAN Generation System — Subphase 1.1
+# Service : Redis 7.2 (Celery broker + result backend)
+#
+# Usage:
+#   docker compose up -d          # start Redis in background
+#   docker compose logs -f redis  # tail logs
+#   docker compose down           # stop and remove container
+# ==============================================================================
+
+version: "3.9"
+
+services:
+  redis:
+    image: redis:7.2-alpine
+    container_name: gan3d_redis
+    restart: unless-stopped
+
+    ports:
+      - "6379:6379"              # expose to localhost only — no external binding
+
+    command: >
+      redis-server
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --appendonly no
+      --save ""
+      --loglevel notice
+
+    # -------------------------------------------------------------------------
+    # maxmemory 512mb  : hard cap; prevents Redis eating RAM on a consumer rig
+    # allkeys-lru      : evict least-recently-used keys when limit is hit.
+    #                    Safe for our use case — job TTLs are 24h and we cap
+    #                    queue depth at 10, so total key count is always tiny.
+    # appendonly no    : disable AOF persistence — this is a local ephemeral
+    #                    broker, not a durable store. Speeds up writes.
+    # save ""          : disable RDB snapshots for the same reason.
+    # -------------------------------------------------------------------------
+
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+    volumes:
+      - gan3d_redis_data:/data
+
+volumes:
+  gan3d_redis_data:
+    driver: local

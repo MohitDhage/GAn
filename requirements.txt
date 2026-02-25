@@ -1,0 +1,46 @@
+# ==============================================================================
+# 3D-GAN Generation System — Subphase 1.1
+# Target Hardware : NVIDIA RTX 3050 (8GB VRAM)
+# CUDA Toolkit    : 11.8
+# Python          : 3.10.x
+#
+# Install PyTorch FIRST via the official index (CUDA 11.8 wheel):
+#   pip install torch==2.1.2 torchvision==0.16.2 --index-url https://download.pytorch.org/whl/cu118
+#
+# Then install the rest:
+#   pip install -r requirements.txt
+# ==============================================================================
+
+# --- Core ML Framework (installed separately, see above) ----------------------
+torch==2.1.2
+torchvision==0.16.2
+
+# --- API Layer ----------------------------------------------------------------
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+python-multipart==0.0.9          # required for FastAPI file upload support
+
+# --- Task Queue & Broker ------------------------------------------------------
+celery==5.3.6
+redis==5.0.4                     # Python Redis client (matches Redis 7.x server)
+kombu==5.3.4                     # Celery transport layer — pin to avoid breakage
+
+# --- 3D Mesh Post-Processing --------------------------------------------------
+trimesh==4.3.2                   # mesh I/O, cleaning, GLB export
+scikit-image==0.23.2             # Marching Cubes (skimage.measure.marching_cubes)
+numpy==1.26.4                    # pinned — trimesh & torch share this boundary
+scipy==1.13.0                    # trimesh optional dependency for convex hull etc.
+pyglet==2.0.15                   # trimesh viewer backend (headless-safe)
+
+# --- Image Processing (2D input pipeline) -------------------------------------
+Pillow==10.3.0
+opencv-python-headless==4.9.0.80 # headless variant — no Qt dependency on server
+
+# --- Data Validation & Serialisation ------------------------------------------
+pydantic==2.7.1                  # FastAPI v0.111 requires Pydantic v2
+pydantic-settings==2.2.1
+
+# --- Utilities ----------------------------------------------------------------
+python-dotenv==1.0.1
+structlog==24.1.0                # structured JSON logging (used from Subphase 1.5)
+httpx==0.27.0                    # async HTTP client for internal health checks
