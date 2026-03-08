@@ -19,6 +19,9 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+*.tsbuildinfo
+.vscode/
+.idea/
 
 # Virtual Environment
 .venv/
@@ -26,10 +29,11 @@ venv/
 ENV/
 
 # Project Specific
-outputs/*.glb
-outputs/*.obj
-outputs/*.mtl
+outputs/
+test_outputs/
 weights/
+checkpoints/
+dataset/
 *.pth
 *.ckpt
 *.bin
@@ -39,6 +43,8 @@ weights/
 # Logs and databases
 *.log
 *.sqlite
+dump.rdb
+pix3d.zip
 
 # OS specific
 .DS_Store
