@@ -39,6 +39,8 @@ class JobDetailResponse(BaseModel):
     
     # Populated only on COMPLETED
     asset_url: Optional[str] = Field(None, description="URL to download the generated .glb file")
+    voxel_grid_url: Optional[str] = Field(None, description="URL to download the raw .npy voxel grid")
+    radiography_url: Optional[str] = Field(None, description="URL to download the thickness radiography image")
     file_size_bytes: Optional[int] = Field(None, description="Size of the generated file in bytes")
     generation_time_seconds: Optional[float] = Field(None, description="Time taken to generate")
     

@@ -13,10 +13,16 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 import redis
+import mimetypes
+
+# Fix for .vox files not being recognized as GLB by some browsers
+mimetypes.add_type("model/gltf-binary", ".vox")
+mimetypes.add_type("model/gltf-binary", ".glb")
 
 # Import our Celery app and task
 from celery_app import celery_app
-from tasks import generate_3d_asset
+from celery.result import AsyncResult
+from tasks import generate_3d_asset, read_job_meta
 from schemas import (
     GenerateResponse,
     JobStatusResponse,
@@ -154,7 +160,9 @@ async def health_check():
     },
 )
 async def create_generation_job(
-    image: UploadFile = File(..., description="Input image file (PNG, JPG, JPEG)")
+    image: UploadFile = File(..., description="Input image file (PNG, JPG, JPEG)"),
+    export_format: str = "glb",
+    skin_removal_layers: int = 0
 ):
     """
     Submit a new 3D asset generation job.
@@ -213,7 +221,7 @@ async def create_generation_job(
 
     # Dispatch Celery task — pass job_id as both first arg AND task_id
     task = generate_3d_asset.apply_async(
-        args=[job_id, image_data, image_shape],
+        args=[job_id, image_data, image_shape, None, 128, export_format, skin_removal_layers],
         task_id=job_id,
     )
     
@@ -256,17 +264,44 @@ async def get_job_status(job_id: str):
     Lightweight endpoint for high-frequency polling.
     Returns only status and progress.
     """
+    # 1. Check Redis for base data (existence check)
     job_data = get_job_data(job_id)
-    
     if not job_data:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Job {job_id} not found or expired.",
         )
     
+    # 2. Query Celery for live status
+    result = AsyncResult(job_id, app=celery_app)
+    
+    # Map Celery states to our JobStatus enum
+    # STARTED/PENDING -> QUEUED or PROCESSING
+    # SUCCESS -> COMPLETED
+    # FAILURE -> FAILED
+    status_map = {
+        "PENDING": "QUEUED",
+        "STARTED": "PROCESSING",
+        "PROGRESS": "PROCESSING",
+        "SUCCESS": "COMPLETED",
+        "FAILURE": "FAILED",
+        "REVOKED": "FAILED",
+    }
+    
+    live_status = status_map.get(result.state, "PROCESSING")
+    progress = 0
+    
+    # Extract progress from Celery info if available
+    if result.state == "PROGRESS":
+        progress = result.info.get("progress", 0)
+    elif result.state == "SUCCESS":
+        progress = 100
+    elif result.state == "STARTED":
+        progress = 5
+        
     return JobStatusResponse(
-        status=job_data["status"],
-        progress=job_data.get("progress", 0),
+        status=live_status,
+        progress=progress,
     )
 
 
@@ -282,32 +317,72 @@ async def get_job_details(job_id: str):
     """
     Get full job details including asset URL and file size when completed.
     """
+    # 1. Base data from Redis (DB 0)
     job_data = get_job_data(job_id)
-    
     if not job_data:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Job {job_id} not found or expired.",
         )
     
+    # 2. Live status from Celery
+    result = AsyncResult(job_id, app=celery_app)
+    
+    # 3. Enriched metadata from tasks (DB 1)
+    meta = read_job_meta(job_id)
+    
+    # Map status
+    status_map = {
+        "PENDING": "QUEUED",
+        "STARTED": "PROCESSING",
+        "PROGRESS": "PROCESSING",
+        "PROCESSING": "PROCESSING",
+        "SUCCESS": "COMPLETED",
+        "FAILURE": "FAILED",
+        "REVOKED": "FAILED",
+    }
+    
+    current_status = status_map.get(result.state, job_data["status"])
+    progress = 0
+    if result.state in ["PROGRESS", "PROCESSING"]:
+        if isinstance(result.info, dict):
+            progress = result.info.get("progress", 0)
+    elif result.state == "SUCCESS":
+        progress = 100
+        
     # Build response
     response = JobDetailResponse(
-        job_id=job_data["job_id"],
-        status=job_data["status"],
-        progress=job_data.get("progress", 0),
+        job_id=job_id,
+        status=current_status,
+        progress=progress,
         created_at=datetime.fromisoformat(job_data["created_at"]),
         updated_at=datetime.fromisoformat(job_data["updated_at"]),
     )
     
-    # Add completion details if available
-    if job_data["status"] == "COMPLETED":
-        response.asset_url = job_data.get("asset_url")
-        response.file_size_bytes = job_data.get("file_size_bytes")
-        response.generation_time_seconds = job_data.get("generation_time_seconds")
+    # Add details from Celery result if successful
+    if result.state == "SUCCESS" and result.result is not None:
+        response.asset_url = result.result.get("asset_url")
+        response.voxel_grid_url = result.result.get("voxel_grid_url")
+        response.radiography_url = result.result.get("radiography_url") # Added radiography_url
+        response.file_size_bytes = result.result.get("file_size_bytes")
+        # Assuming latency_seconds might be nested under 'metadata' in result.result
+        response.generation_time_seconds = result.result.get("metadata", {}).get("latency_seconds")
     
-    # Add error details if failed
-    if job_data["status"] == "FAILED":
-        response.error_message = job_data.get("error_message")
+    # Add details from meta (DB 1) - this might contain error messages or other info
+    # that isn't directly in the task result, or for non-SUCCESS states.
+    if meta:
+        if "asset_url" in meta and not response.asset_url: # Only set if not already from result
+            response.asset_url = meta["asset_url"]
+        if "voxel_grid_url" in meta and not response.voxel_grid_url:
+            response.voxel_grid_url = meta["voxel_grid_url"]
+        if "radiography_url" in meta and not response.radiography_url: # Added radiography_url
+            response.radiography_url = meta["radiography_url"]
+        if "file_size_bytes" in meta and not response.file_size_bytes:
+            response.file_size_bytes = meta["file_size_bytes"]
+        if "latency_seconds" in meta and not response.generation_time_seconds:
+            response.generation_time_seconds = meta["latency_seconds"]
+        if "error" in meta:
+            response.error_message = meta["error"].get("message")
     
     return response
 

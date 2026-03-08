@@ -263,28 +263,36 @@ def load_models(device: torch.device) -> tuple[ImageEncoder, Generator]:
     generator = Generator(latent_dim=LATENT_DIM, img_feat_dim=IMAGE_FEATURE_DIM)
 
     # Load trained weights if paths are provided
-    enc_weights  = os.environ.get("ENCODER_WEIGHTS_PATH")
-    gen_weights  = os.environ.get("GENERATOR_WEIGHTS_PATH")
+    enc_weights = os.environ.get("ENCODER_WEIGHTS_PATH")
+    gen_weights = os.environ.get("GENERATOR_WEIGHTS_PATH")
+
+    # Autodiscovery: If not provided, try to find the latest epoch in /checkpoints
+    checkpoint_dir = Path(__file__).parent / "checkpoints"
+    if not enc_weights or not gen_weights:
+        if checkpoint_dir.exists():
+            enc_files = list(checkpoint_dir.glob("encoder_epoch_*.pth"))
+            gen_files = list(checkpoint_dir.glob("generator_epoch_*.pth"))
+            if enc_files and gen_files:
+                # Extract epoch number from filename 'encoder_epoch_14.pth'
+                latest_enc = max(enc_files, key=lambda p: int(p.stem.split('_')[-1]))
+                latest_gen = max(gen_files, key=lambda p: int(p.stem.split('_')[-1]))
+                if not enc_weights: enc_weights = str(latest_enc)
+                if not gen_weights: gen_weights = str(latest_gen)
+                logger.info("Autodiscovered latest checkpoints: Epoch %s", latest_enc.stem.split('_')[-1])
 
     if enc_weights and Path(enc_weights).exists():
         state = torch.load(enc_weights, map_location=device)
         encoder.load_state_dict(state)
         logger.info("Loaded encoder weights from %s", enc_weights)
     else:
-        logger.warning(
-            "ENCODER_WEIGHTS_PATH not set or file missing. "
-            "Running with randomly initialised encoder (placeholder mode)."
-        )
+        logger.warning("ENCODER_WEIGHTS_PATH not set/missing. Running with random weights.")
 
     if gen_weights and Path(gen_weights).exists():
         state = torch.load(gen_weights, map_location=device)
         generator.load_state_dict(state)
         logger.info("Loaded generator weights from %s", gen_weights)
     else:
-        logger.warning(
-            "GENERATOR_WEIGHTS_PATH not set or file missing. "
-            "Running with randomly initialised generator (placeholder mode)."
-        )
+        logger.warning("GENERATOR_WEIGHTS_PATH not set/missing. Running with random weights.")
 
     encoder.to(device).eval()
     generator.to(device).eval()
@@ -399,63 +407,158 @@ def scalar_field_to_mesh(
     return mesh, n_components  # return n_components for metadata
 
 
+def remove_voxel_layers(binary_grid: np.ndarray, n_layers: int) -> np.ndarray:
+    """
+    Simulates 'Progressive Skin Removal' as described in the IIT Bombay paper.
+    Each iteration removes the current outer surface voxels.
+    """
+    if n_layers <= 0:
+        return binary_grid
+    
+    from scipy.ndimage import binary_erosion
+    result = binary_grid.copy()
+    for _ in range(n_layers):
+        # Erosion removes the surface layer
+        result = binary_erosion(result)
+        if result.sum() == 0:
+            break
+    return result
+
+def generate_radiography(binary_grid: np.ndarray) -> np.ndarray:
+    """
+    Generates a 'Total Thickness' radiography Projection (Z-axis).
+    Intensity is proportional to the number of filled voxels along each ray.
+    """
+    thickness_map = binary_grid.sum(axis=2)
+    # Normalize to 0-255 for visualization
+    if thickness_map.max() > 0:
+        thickness_map = (thickness_map / thickness_map.max() * 255).astype(np.uint8)
+    return thickness_map
+
+def scalar_field_to_voxel_mesh(
+    scalar_field: np.ndarray,
+    threshold: float = DEFAULT_ISO_LEVEL,
+    skin_removal_layers: int = 0
+) -> tuple[trimesh.Trimesh, int]:
+    """
+    Convert a 3D scalar field to a mesh composed of cubes.
+    Includes advanced 'Skin Removal' analysis features.
+    """
+    # Guard: ensure threshold logic
+    field_min, field_max = scalar_field.min(), scalar_field.max()
+    if not (field_min < threshold < field_max):
+        threshold = float((field_min + field_max) / 2.0)
+
+    binary_grid = scalar_field >= threshold
+
+    # Apply Skin Removal if requested
+    if skin_removal_layers > 0:
+        binary_grid = remove_voxel_layers(binary_grid, skin_removal_layers)
+
+    n_voxels = int(binary_grid.sum())
+    if n_voxels == 0:
+        binary_grid = np.zeros_like(scalar_field, dtype=bool)
+        center = binary_grid.shape[0] // 2
+        binary_grid[center, center, center] = True
+
+    # High resolution support up to 128 for detailed thickness analysis
+    # Match the "Ganesha" and "Cylinder" examples from the paper
+    native_res = binary_grid.shape[0]
+    target_res = 128
+    if native_res > target_res:
+        from scipy.ndimage import zoom
+        scale = target_res / native_res
+        binary_grid = zoom(binary_grid.astype(float), zoom=scale, order=0) > 0.5
+
+    # Create trimesh VoxelGrid
+    from trimesh.voxel import VoxelGrid
+    voxels = VoxelGrid(binary_grid)
+    mesh = voxels.as_boxes()
+
+    # Concatenate for viewer efficiency
+    if hasattr(mesh, '__len__') and not isinstance(mesh, trimesh.Trimesh):
+        mesh = trimesh.util.concatenate(mesh)
+
+    return mesh, 1
+
+
+# --------------------------------------------------------------------------- #
+# Voxel Grid Export                                                            #
+# --------------------------------------------------------------------------- #
+
+def save_voxel_grid(
+    scalar_field: np.ndarray,
+    job_id: str,
+    threshold: float = DEFAULT_ISO_LEVEL,
+) -> Path:
+    """
+    Save the raw 3D voxel grid produced by the Generator to disk.
+
+    Two files are written to OUTPUTS_DIR:
+      - <job_id>_voxels.npy   : float32 occupancy field, shape (D, H, W), values in [0,1]
+      - <job_id>_voxels_binary.npy : boolean grid (True = occupied), same shape
+
+    The float grid retains the full sigmoid output so you can re-threshold
+    later. The binary grid is the version actually used by Marching Cubes.
+
+    Returns the path to the float32 .npy file.
+    """
+    float_path  = OUTPUTS_DIR / f"{job_id}_voxels.npy"
+    binary_path = OUTPUTS_DIR / f"{job_id}_voxels_binary.npy"
+
+    np.save(str(float_path),  scalar_field.astype(np.float32))
+    np.save(str(binary_path), (scalar_field >= threshold).astype(bool))
+
+    logger.info(
+        "Voxel grid saved | job=%s | shape=%s | occupied_voxels=%d/%d | path=%s",
+        job_id,
+        scalar_field.shape,
+        int((scalar_field >= threshold).sum()),
+        scalar_field.size,
+        float_path,
+    )
+    return float_path
+
+
 # --------------------------------------------------------------------------- #
 # Atomic write                                                                 #
 # --------------------------------------------------------------------------- #
 
-def atomic_write_glb(mesh: trimesh.Trimesh, job_id: str) -> tuple[Path, int]:
+def atomic_write_mesh(mesh: trimesh.Trimesh, job_id: str, file_format: str = "glb") -> tuple[Path, int]:
     """
-    Export mesh to GLB using a .tmp → os.rename() atomic pattern.
+    Export mesh to specified format using a .tmp → os.rename() atomic pattern.
 
-    Guarantees that the final .glb path is only visible to the filesystem
-    (and therefore to FastAPI's static file server) after the file handle
-    is fully flushed and closed.
-
+    Supported formats: glb, obj, stl, ply.
     Returns (final_path, file_size_bytes).
-    Raises RuntimeError on write failure with cleanup.
     """
-    final_path = OUTPUTS_DIR / f"{job_id}.glb"
+    file_format = file_format.lower()
+    if file_format not in ["glb", "obj", "stl", "ply", "vox"]:
+        file_format = "glb"
+
+    # Use GLB as the wire format for VOX to ensure viewer compatibility
+    # but keep the .vox extension for the final file.
+    export_type = "glb" if file_format == "vox" else file_format
+    final_path = OUTPUTS_DIR / f"{job_id}.{file_format}"
     tmp_fd, tmp_path_str = tempfile.mkstemp(suffix=".tmp", dir=OUTPUTS_DIR)
     tmp_path = Path(tmp_path_str)
 
     try:
-        # Close the fd before trimesh writes — trimesh uses its own file handle
         os.close(tmp_fd)
+        mesh.export(tmp_path_str, file_type=export_type)
 
-        # CRITICAL: pass file_type explicitly — trimesh infers format from the
-        # file extension by default. A .tmp extension has no registered exporter
-        # and raises ValueError. Forcing 'glb' bypasses extension detection entirely.
-        mesh.export(tmp_path_str, file_type="glb")
-
-        # Validate the tmp file is non-empty before rename
         tmp_size = tmp_path.stat().st_size
         if tmp_size == 0:
-            raise RuntimeError(
-                f"trimesh exported 0-byte GLB for job {job_id}. "
-                "Mesh may be empty after cleanup step."
-            )
+            raise RuntimeError(f"trimesh exported 0-byte {file_format} for job {job_id}.")
 
-        # No explicit fsync needed: trimesh opens, writes, and closes its own
-        # handle before returning. Re-opening for fsync in 'rb' mode raises
-        # [Errno 9] Bad file descriptor on Windows because FlushFileBuffers
-        # requires write access. The size check above is the integrity gate.
-
-        # Atomic rename — file is either fully present or absent on any reader
         os.rename(tmp_path_str, final_path)
-
         file_size = final_path.stat().st_size
-        logger.info(
-            "GLB written atomically: %s (%d bytes)", final_path, file_size
-        )
+        logger.info("%s written atomically: %s (%d bytes)", file_format.upper(), final_path, file_size)
         return final_path, file_size
 
     except Exception as exc:
-        # Clean up orphaned .tmp on any failure
         if tmp_path.exists():
             tmp_path.unlink(missing_ok=True)
-        raise RuntimeError(
-            f"atomic_write_glb failed for job {job_id}: {exc}"
-        ) from exc
+        raise RuntimeError(f"atomic_write_mesh failed for job {job_id}: {exc}") from exc
 
 
 # --------------------------------------------------------------------------- #
@@ -468,6 +571,8 @@ def run_inference(
     noise_vector:   Optional[torch.Tensor] = None,  # (1, LATENT_DIM); random if None
     mc_resolution:  int   = DEFAULT_MC_RESOLUTION,
     iso_level:      float = DEFAULT_ISO_LEVEL,
+    export_format:  str   = "glb",
+    skin_removal_layers: int = 0,
 ) -> dict:
     """
     Full 2D-image → .glb pipeline.
@@ -562,30 +667,59 @@ def run_inference(
     logger.info("Peak VRAM after forward pass: %.2f MB", peak_vram_mb)
 
     # ------------------------------------------------------------------ #
-    # Step 4 — Marching Cubes + mesh cleanup (CPU, no VRAM impact)       #
+    # Step 4 — Save raw voxel grid (before Marching Cubes conversion)    #
     # ------------------------------------------------------------------ #
-    mesh, n_components = scalar_field_to_mesh(
-        scalar_field_np,
-        mc_resolution=mc_resolution,
-        iso_level=iso_level,
-    )
+    voxel_path = save_voxel_grid(scalar_field_np, job_id, threshold=iso_level)
 
     # ------------------------------------------------------------------ #
-    # Step 5 — Atomic GLB write                                           #
+    # Step 5 — Mesh Generation (Smooth via Marching Cubes OR Blocky via Voxels)
     # ------------------------------------------------------------------ #
-    final_path, file_size_bytes = atomic_write_glb(mesh, job_id)
+    radiography_url = None
+    if export_format.lower() == "vox":
+        logger.info("Generating Voxel-based mesh (blocky mode)...")
+        mesh, n_components = scalar_field_to_voxel_mesh(
+            scalar_field_np,
+            threshold=iso_level,
+            skin_removal_layers=skin_removal_layers
+        )
+        
+        # Generate Radiography (Thickness Analysis View)
+        binary_grid = scalar_field_np >= iso_level
+        if skin_removal_layers > 0:
+            binary_grid = remove_voxel_layers(binary_grid, skin_removal_layers)
+        
+        rad_img = generate_radiography(binary_grid)
+        from PIL import Image
+        rad_pil = Image.fromarray(rad_img)
+        rad_path = OUTPUTS_DIR / f"{job_id}_radiography.png"
+        rad_pil.save(rad_path)
+        radiography_url = f"/outputs/{job_id}_radiography.png"
+    else:
+        # Default smooth reconstruction
+        mesh, n_components = scalar_field_to_mesh(
+            scalar_field_np,
+            mc_resolution=mc_resolution,
+            iso_level=iso_level,
+        )
+
+    # ------------------------------------------------------------------ #
+    # Step 6 — Atomic mesh write                                          #
+    # ------------------------------------------------------------------ #
+    final_path, file_size_bytes = atomic_write_mesh(mesh, job_id, export_format)
 
     wall_elapsed = time.perf_counter() - wall_start
     logger.info(
-        "run_inference complete | job=%s | latency=%.2fs | file_size=%d bytes",
-        job_id, wall_elapsed, file_size_bytes,
+        "run_inference complete | job=%s | latency=%.2fs | file_size=%d bytes | format=%s",
+        job_id, wall_elapsed, file_size_bytes, export_format
     )
 
     # ------------------------------------------------------------------ #
-    # Step 6 — Return Phase 1.4 contract                                 #
+    # Step 7 — Return Phase 1.4 contract (now includes voxel grid path)  #
     # ------------------------------------------------------------------ #
     return {
-        "asset_url":        f"/outputs/{job_id}.glb",
+        "asset_url":        f"/outputs/{job_id}.{export_format}",
+        "voxel_grid_url":   f"/outputs/{job_id}_voxels.npy",
+        "radiography_url":  radiography_url,
         "file_size_bytes":  file_size_bytes,
         "metadata": {
             "job_id":                   job_id,
@@ -596,5 +730,8 @@ def run_inference(
             "face_count":               len(mesh.faces),
             "components_before_clean":  n_components,
             "generator_class":          generator.__class__.__name__,
+            "voxel_grid_shape":         list(scalar_field_np.shape),
+            "voxel_grid_path":          str(voxel_path),
+            "skin_removed_layers":      skin_removal_layers,
         },
     }

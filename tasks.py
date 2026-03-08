@@ -85,8 +85,12 @@ def _meta_key(job_id: str) -> str:
 def _write_meta(job_id: str, **fields):
     """Merge fields into the job metadata hash in Redis."""
     key = _meta_key(job_id)
-    redis_client.hset(key, mapping={k: json.dumps(v) for k, v in fields.items()})
-    redis_client.expire(key, _META_TTL)
+    # Using pipeline + individual hset calls for compatibility with Redis 3.x
+    pipe = redis_client.pipeline()
+    for k, v in fields.items():
+        pipe.hset(key, k, json.dumps(v))
+    pipe.expire(key, _META_TTL)
+    pipe.execute()
 
 
 def read_job_meta(job_id: str) -> dict:
@@ -180,6 +184,8 @@ def generate_3d_asset(
     image_shape:    list,       # [1, 3, H, W]
     noise_seed:     Optional[int] = None,
     mc_resolution:  int = 128,
+    export_format:  str = "glb",
+    skin_removal_layers: int = 0,
 ) -> dict:
     """
     Full 2D→3D generation task.
@@ -215,7 +221,7 @@ def generate_3d_asset(
     # ---------------------------------------------------------------------- #
     # Record submission timestamp for TTL purge task                         #
     # ---------------------------------------------------------------------- #
-    _write_meta(job_id, submitted_at=time.time(), mc_resolution=mc_resolution)
+    _write_meta(job_id, submitted_at=time.time(), mc_resolution=mc_resolution, skin_removal_layers=skin_removal_layers)
 
     logger.info(
         "generate_3d_asset START | job=%s | resolution=%d | seed=%s",
@@ -227,7 +233,7 @@ def generate_3d_asset(
     # Emit an explicit state so FastAPI can surface a progress bar from tick 1
     # ---------------------------------------------------------------------- #
     self.update_state(
-        state="PROCESSING",
+        state="PROGRESS",
         meta={
             "progress":  5,
             "stage":     "Initialising inference pipeline",
@@ -268,35 +274,35 @@ def generate_3d_asset(
 
         # Save originals
         _orig_scalar_field_to_mesh = _inf_module.scalar_field_to_mesh
-        _orig_atomic_write_glb     = _inf_module.atomic_write_glb
+        _orig_scalar_field_to_voxel_mesh = _inf_module.scalar_field_to_voxel_mesh
 
         task_self = self   # closure reference
 
-        def _hooked_scalar_field_to_mesh(*args, **kwargs):
-            """Emit 30% after forward pass, before MC (called from run_inference)."""
-            # Forward pass is done by the time scalar_field_to_mesh is called
-            task_self.update_state(
-                state="PROCESSING",
-                meta={
-                    "progress":  30,
-                    "stage":     "Forward pass complete — running Marching Cubes",
-                    "job_id":    job_id,
-                },
-            )
-            result = _orig_scalar_field_to_mesh(*args, **kwargs)
-            # 80% after mesh cleanup returns
-            task_self.update_state(
-                state="PROCESSING",
-                meta={
-                    "progress":  80,
-                    "stage":     "Mesh cleanup complete — writing GLB",
-                    "job_id":    job_id,
-                },
-            )
-            return result
+        def _hooked_progress_wrapper(original_fn, stage_name):
+            def wrapper(*args, **kwargs):
+                task_self.update_state(
+                    state="PROGRESS",
+                    meta={
+                        "progress":  30,
+                        "stage":     f"Forward pass complete — running {stage_name}",
+                        "job_id":    job_id,
+                    },
+                )
+                result = original_fn(*args, **kwargs)
+                task_self.update_state(
+                    state="PROGRESS",
+                    meta={
+                        "progress":  80,
+                        "stage":     f"{stage_name} complete — writing Asset",
+                        "job_id":    job_id,
+                    },
+                )
+                return result
+            return wrapper
 
         # Temporarily patch the module-level functions
-        _inf_module.scalar_field_to_mesh = _hooked_scalar_field_to_mesh
+        _inf_module.scalar_field_to_mesh = _hooked_progress_wrapper(_orig_scalar_field_to_mesh, "Marching Cubes")
+        _inf_module.scalar_field_to_voxel_mesh = _hooked_progress_wrapper(_orig_scalar_field_to_voxel_mesh, "Voxel Mesh Gen")
 
         try:
             result = run_inference(
@@ -304,11 +310,13 @@ def generate_3d_asset(
                 input_tensor=input_tensor,
                 noise_vector=noise_vector,
                 mc_resolution=mc_resolution,
+                export_format=export_format,
+                skin_removal_layers=skin_removal_layers
             )
         finally:
             # Always restore originals — critical for singleton reuse
             _inf_module.scalar_field_to_mesh = _orig_scalar_field_to_mesh
-            _inf_module.atomic_write_glb     = _orig_atomic_write_glb
+            _inf_module.scalar_field_to_voxel_mesh = _orig_scalar_field_to_voxel_mesh
 
         # ------------------------------------------------------------------ #
         # MILESTONE 3 — COMPLETED                                            #
@@ -321,6 +329,8 @@ def generate_3d_asset(
             completed_at=time.time(),
             latency_seconds=round(wall_elapsed, 3),
             asset_url=result["asset_url"],
+            voxel_grid_url=result.get("voxel_grid_url"),
+            radiography_url=result.get("radiography_url"),
             file_size_bytes=result["file_size_bytes"],
         )
 
