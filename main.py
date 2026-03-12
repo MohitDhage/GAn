@@ -201,13 +201,21 @@ async def create_generation_job(
 
         image_bytes = await image.read()
 
-        # Open and preprocess image — convert to float32 tensor (1, 3, H, W)
+        # Open and preprocess image — resize to 256x256 then convert to float32 tensor (1, 3, 256, 256)
         pil_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        pil_image = pil_image.resize((256, 256), Image.Resampling.LANCZOS)
+        
         img_np = np.array(pil_image, dtype=np.float32) / 255.0  # H x W x 3, [0,1]
-        img_np = img_np.transpose(2, 0, 1)                       # 3 x H x W
-        img_np = img_np[np.newaxis, ...]                         # 1 x 3 x H x W
+        
+        # Normalization (ImageNet stats used in training)
+        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+        img_np = (img_np - mean) / std
+        
+        img_np = img_np.transpose(2, 0, 1)                       # 3 x 256 x 256
+        img_np = img_np[np.newaxis, ...]                         # 1 x 3 x 256 x 256
 
-        image_shape = list(img_np.shape)          # [1, 3, H, W]
+        image_shape = list(img_np.shape)          # [1, 3, 256, 256]
         image_data  = img_np.flatten().tolist()   # flat float list (JSON-safe)
 
     except Exception as e:
@@ -363,6 +371,7 @@ async def get_job_details(job_id: str):
     if result.state == "SUCCESS" and result.result is not None:
         response.asset_url = result.result.get("asset_url")
         response.voxel_grid_url = result.result.get("voxel_grid_url")
+        response.voxel_vis_url = result.result.get("voxel_vis_url")
         response.radiography_url = result.result.get("radiography_url") # Added radiography_url
         response.file_size_bytes = result.result.get("file_size_bytes")
         # Assuming latency_seconds might be nested under 'metadata' in result.result
@@ -375,6 +384,8 @@ async def get_job_details(job_id: str):
             response.asset_url = meta["asset_url"]
         if "voxel_grid_url" in meta and not response.voxel_grid_url:
             response.voxel_grid_url = meta["voxel_grid_url"]
+        if "voxel_vis_url" in meta and not response.voxel_vis_url:
+            response.voxel_vis_url = meta["voxel_vis_url"]
         if "radiography_url" in meta and not response.radiography_url: # Added radiography_url
             response.radiography_url = meta["radiography_url"]
         if "file_size_bytes" in meta and not response.file_size_bytes:

@@ -266,19 +266,25 @@ def load_models(device: torch.device) -> tuple[ImageEncoder, Generator]:
     enc_weights = os.environ.get("ENCODER_WEIGHTS_PATH")
     gen_weights = os.environ.get("GENERATOR_WEIGHTS_PATH")
 
-    # Autodiscovery: If not provided, try to find the latest epoch in /checkpoints
-    checkpoint_dir = Path(__file__).parent / "checkpoints"
+    # Autodiscovery: prefer checkpoints_v2 (trained with reconstruction loss),
+    # fall back to checkpoints (old adversarial-only training)
+    checkpoint_dirs = [
+        Path(__file__).parent / "checkpoints_v2",
+        Path(__file__).parent / "checkpoints",
+    ]
     if not enc_weights or not gen_weights:
-        if checkpoint_dir.exists():
-            enc_files = list(checkpoint_dir.glob("encoder_epoch_*.pth"))
-            gen_files = list(checkpoint_dir.glob("generator_epoch_*.pth"))
-            if enc_files and gen_files:
-                # Extract epoch number from filename 'encoder_epoch_14.pth'
-                latest_enc = max(enc_files, key=lambda p: int(p.stem.split('_')[-1]))
-                latest_gen = max(gen_files, key=lambda p: int(p.stem.split('_')[-1]))
-                if not enc_weights: enc_weights = str(latest_enc)
-                if not gen_weights: gen_weights = str(latest_gen)
-                logger.info("Autodiscovered latest checkpoints: Epoch %s", latest_enc.stem.split('_')[-1])
+        for checkpoint_dir in checkpoint_dirs:
+            if checkpoint_dir.exists():
+                enc_files = list(checkpoint_dir.glob("encoder_epoch_*.pth"))
+                gen_files = list(checkpoint_dir.glob("generator_epoch_*.pth"))
+                if enc_files and gen_files:
+                    # Extract epoch number from filename 'encoder_epoch_14.pth'
+                    latest_enc = max(enc_files, key=lambda p: int(p.stem.split('_')[-1]))
+                    latest_gen = max(gen_files, key=lambda p: int(p.stem.split('_')[-1]))
+                    if not enc_weights: enc_weights = str(latest_enc)
+                    if not gen_weights: gen_weights = str(latest_gen)
+                    logger.info("Autodiscovered latest checkpoints from %s: Epoch %s", checkpoint_dir.name, latest_enc.stem.split('_')[-1])
+                    break  # Use the first directory that has checkpoints
 
     if enc_weights and Path(enc_weights).exists():
         state = torch.load(enc_weights, map_location=device)
@@ -434,6 +440,45 @@ def generate_radiography(binary_grid: np.ndarray) -> np.ndarray:
     if thickness_map.max() > 0:
         thickness_map = (thickness_map / thickness_map.max() * 255).astype(np.uint8)
     return thickness_map
+
+def generate_voxel_visualization(binary_grid: np.ndarray) -> np.ndarray:
+    """
+    Creates a 3D scatter plot / voxel visualization of the grid as a PNG image.
+    Uses matplotlib to render the 3D array into a buffer.
+    """
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.mplot3d import Axes3D
+    import io
+    
+    # Downsample if too high for plotting (plotting 128^3 is slow)
+    res = binary_grid.shape[0]
+    if res > 32:
+        from scipy.ndimage import zoom
+        scale = 32 / res
+        binary_grid = zoom(binary_grid.astype(float), zoom=scale, order=0) > 0.5
+    
+    fig = plt.figure(figsize=(10, 10), backgroundcolor='black')
+    ax = fig.add_subplot(111, projection='3d')
+    ax.set_facecolor('black')
+    
+    # Hide axes
+    ax.set_axis_off()
+    
+    # Plot voxels
+    ax.voxels(binary_grid, facecolors='cyan', edgecolors='white', alpha=0.5)
+    
+    # Set view angle
+    ax.view_init(elev=30, azim=45)
+    
+    # Save to buffer
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=100, facecolor='black', bbox_inches='tight', pad_inches=0)
+    plt.close(fig)
+    
+    buf.seek(0)
+    from PIL import Image
+    vis_img = np.array(Image.open(buf).convert('RGB'))
+    return vis_img
 
 def scalar_field_to_voxel_mesh(
     scalar_field: np.ndarray,
@@ -655,6 +700,15 @@ def run_inference(
     scalar_field_np: np.ndarray = (
         scalar_field_tensor[0, 0].float().cpu().numpy()
     )
+    
+    field_min = float(scalar_field_np.min())
+    field_max = float(scalar_field_np.max())
+    field_mean = float(scalar_field_np.mean())
+    logger.info(
+        "Generator output range: [%.4f, %.4f] | mean: %.4f | above threshold (%.2f): %d",
+        field_min, field_max, field_mean, iso_level, int((scalar_field_np >= iso_level).sum())
+    )
+    
     del scalar_field_tensor, image_features
     if device.type == "cuda":
         torch.cuda.empty_cache()
@@ -688,12 +742,15 @@ def run_inference(
         if skin_removal_layers > 0:
             binary_grid = remove_voxel_layers(binary_grid, skin_removal_layers)
         
-        rad_img = generate_radiography(binary_grid)
-        from PIL import Image
-        rad_pil = Image.fromarray(rad_img)
-        rad_path = OUTPUTS_DIR / f"{job_id}_radiography.png"
-        rad_pil.save(rad_path)
-        radiography_url = f"/outputs/{job_id}_radiography.png"
+        try:
+            rad_img = generate_radiography(binary_grid)
+            from PIL import Image
+            rad_pil = Image.fromarray(rad_img)
+            rad_path = OUTPUTS_DIR / f"{job_id}_radiography.png"
+            rad_pil.save(rad_path)
+            radiography_url = f"/outputs/{job_id}_radiography.png"
+        except Exception as e:
+            logger.error("Failed to generate radiography: %s", e)
     else:
         # Default smooth reconstruction
         mesh, n_components = scalar_field_to_mesh(
@@ -701,6 +758,25 @@ def run_inference(
             mc_resolution=mc_resolution,
             iso_level=iso_level,
         )
+
+    # ------------------------------------------------------------------ #
+    # Step 5.5 — Generate Voxel Visualization (Universal Output)         #
+    # ------------------------------------------------------------------ #
+    voxel_vis_url = None
+    try:
+        # Generate Voxel Visualization (Always create this for 'Voxel Representation' request)
+        binary_grid_vis = scalar_field_np >= iso_level
+        if skin_removal_layers > 0:
+            binary_grid_vis = remove_voxel_layers(binary_grid_vis, skin_removal_layers)
+        
+        voxel_vis_img = generate_voxel_visualization(binary_grid_vis)
+        from PIL import Image
+        vis_pil = Image.fromarray(voxel_vis_img)
+        vis_path = OUTPUTS_DIR / f"{job_id}_voxel_vis.png"
+        vis_pil.save(vis_path)
+        voxel_vis_url = f"/outputs/{job_id}_voxel_vis.png"
+    except Exception as e:
+        logger.error("Failed to generate voxel visualization: %s", e)
 
     # ------------------------------------------------------------------ #
     # Step 6 — Atomic mesh write                                          #
@@ -719,6 +795,7 @@ def run_inference(
     return {
         "asset_url":        f"/outputs/{job_id}.{export_format}",
         "voxel_grid_url":   f"/outputs/{job_id}_voxels.npy",
+        "voxel_vis_url":    voxel_vis_url,
         "radiography_url":  radiography_url,
         "file_size_bytes":  file_size_bytes,
         "metadata": {

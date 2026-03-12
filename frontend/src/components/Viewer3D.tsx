@@ -29,13 +29,14 @@ const Model = ({ url }: ModelProps) => {
 interface ViewerProps {
     assetUrl: string;
     voxelGridUrl?: string;
+    voxelVisUrl?: string;
     radiographyUrl?: string;
     jobId: string;
     sourceImage?: string;
 }
 
-export const Viewer3D: React.FC<ViewerProps> = ({ assetUrl, voxelGridUrl, radiographyUrl, jobId, sourceImage }) => {
-    const [viewMode, setViewMode] = React.useState<'3d' | 'radiography'>('3d');
+export const Viewer3D: React.FC<ViewerProps> = ({ assetUrl, voxelGridUrl, voxelVisUrl, radiographyUrl, jobId, sourceImage }) => {
+    const [viewMode, setViewMode] = React.useState<'3d' | 'radiography' | 'voxels'>('3d');
     const fullUrl = `http://localhost:8000${assetUrl}`;
     const isGLB = assetUrl.toLowerCase().endsWith('.glb') || assetUrl.toLowerCase().endsWith('.vox');
 
@@ -132,7 +133,7 @@ export const Viewer3D: React.FC<ViewerProps> = ({ assetUrl, voxelGridUrl, radiog
                                 </div>
                             </div>
                         )
-                    ) : (
+                    ) : viewMode === 'radiography' ? (
                         <div className="flex-col flex-center" style={{ height: '100%', background: 'rgba(0,0,0,0.8)', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '2rem' }}>
                             <div style={{ position: 'relative', width: '80%', aspectRatio: '1/1', border: '2px dashed #a855f7', borderRadius: '12px', overflow: 'hidden', background: '#000' }}>
                                 <img
@@ -144,6 +145,20 @@ export const Viewer3D: React.FC<ViewerProps> = ({ assetUrl, voxelGridUrl, radiog
                             </div>
                             <p style={{ marginTop: '1rem', color: 'var(--text-secondary)', fontSize: '0.8rem', maxWidth: '400px', textAlign: 'center' }}>
                                 Brighter areas indicate higher volumetric density and object thickness along the orthographic projection Z-axis.
+                            </p>
+                        </div>
+                    ) : (
+                        <div className="flex-col flex-center" style={{ height: '100%', background: '#000', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '2rem' }}>
+                            <div style={{ position: 'relative', width: '80%', aspectRatio: '1/1', border: '2px solid cyan', borderRadius: '12px', overflow: 'hidden', background: '#000', boxShadow: '0 0 30px rgba(0,255,255,0.2)' }}>
+                                <img
+                                    src={`http://localhost:8000${voxelVisUrl}`}
+                                    alt="Voxel Grid Representation"
+                                    style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+                                />
+                                <div style={{ position: 'absolute', top: '10px', left: '10px', color: 'cyan', fontSize: '0.7rem', fontWeight: 800 }}>VOXEL GRID ARCHITECTURE</div>
+                            </div>
+                            <p style={{ marginTop: '1rem', color: 'var(--text-secondary)', fontSize: '0.8rem', maxWidth: '400px', textAlign: 'center' }}>
+                                3D Volumetric Grid reconstructed from the GAN latent space. Each point represents a solid density cell in the occupancy field.
                             </p>
                         </div>
                     )}
@@ -161,19 +176,39 @@ export const Viewer3D: React.FC<ViewerProps> = ({ assetUrl, voxelGridUrl, radiog
                     <div style={{ position: 'absolute', bottom: '1.5rem', left: '1.5rem' }}>
                         <div className="flex-center gap-small" style={{ display: 'flex', gap: '8px' }}>
                             <div className="flex-center gap-small" style={{ background: 'rgba(0,0,0,0.5)', padding: '8px 16px', borderRadius: '10px', backdropFilter: 'blur(10px)', border: '1px solid var(--border-glass)', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                <div style={{ width: '6px', height: '6px', borderRadius: '50%', background: viewMode === '3d' ? 'var(--accent-primary)' : '#a855f7' }}></div>
-                                <span style={{ fontSize: '0.75rem', fontWeight: 700, letterSpacing: '0.5px' }}>{viewMode === '3d' ? '3D VIEWPORT' : 'THICKNESS RADIOGRAPHY'}</span>
+                                <div style={{ width: '6px', height: '6px', borderRadius: '50%', background: viewMode === '3d' ? 'var(--accent-primary)' : viewMode === 'radiography' ? '#a855f7' : 'cyan' }}></div>
+                                <span style={{ fontSize: '0.75rem', fontWeight: 700, letterSpacing: '0.5px' }}>
+                                    {viewMode === '3d' ? '3D VIEWPORT' : viewMode === 'radiography' ? 'THICKNESS RADIOGRAPHY' : 'VOXEL REPRESENTATION'}
+                                </span>
                             </div>
 
-                            {radiographyUrl && (
+                            <div style={{ display: 'flex', gap: '4px' }}>
                                 <button
-                                    onClick={() => setViewMode(viewMode === '3d' ? 'radiography' : '3d')}
+                                    onClick={() => setViewMode('3d')}
                                     className="glass-container flex-center"
-                                    style={{ padding: '8px 16px', fontSize: '0.7rem', fontWeight: 800, background: 'rgba(168, 85, 247, 0.2)', border: '1px solid #a855f7', cursor: 'pointer', borderRadius: '10px' }}
+                                    style={{ padding: '8px 16px', fontSize: '0.7rem', fontWeight: 800, background: viewMode === '3d' ? 'var(--accent-primary)' : 'rgba(255,255,255,0.05)', cursor: 'pointer', borderRadius: '10px' }}
                                 >
-                                    SWITCH TO {viewMode === '3d' ? 'ANALYSIS' : '3D VIEW'}
+                                    MESH
                                 </button>
-                            )}
+                                {radiographyUrl && (
+                                    <button
+                                        onClick={() => setViewMode('radiography')}
+                                        className="glass-container flex-center"
+                                        style={{ padding: '8px 16px', fontSize: '0.7rem', fontWeight: 800, background: viewMode === 'radiography' ? '#a855f7' : 'rgba(255,255,255,0.05)', cursor: 'pointer', borderRadius: '10px' }}
+                                    >
+                                        RADIOGRAPHY
+                                    </button>
+                                )}
+                                {voxelVisUrl && (
+                                    <button
+                                        onClick={() => setViewMode('voxels')}
+                                        className="glass-container flex-center"
+                                        style={{ padding: '8px 16px', fontSize: '0.7rem', fontWeight: 800, background: viewMode === 'voxels' ? 'cyan' : 'rgba(255,255,255,0.05)', color: viewMode === 'voxels' ? 'black' : 'white', cursor: 'pointer', borderRadius: '10px' }}
+                                    >
+                                        VOXEL GRID
+                                    </button>
+                                )}
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -196,7 +231,7 @@ export const Viewer3D: React.FC<ViewerProps> = ({ assetUrl, voxelGridUrl, radiog
                 <div className="flex gap-small" style={{ display: 'flex', gap: '0.75rem' }}>
                     {voxelGridUrl && (
                         <button onClick={handleDownloadVoxels} className="premium-button" style={{ background: 'rgba(255,255,255,0.05)', color: 'white' }}>
-                            <Box size={18} /> Voxel Grid
+                            <Box size={18} /> Voxel Data
                         </button>
                     )}
                     <button onClick={handleDownload} className="premium-button">

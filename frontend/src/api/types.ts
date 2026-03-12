@@ -20,6 +20,7 @@ export interface JobDetailResponse {
     updated_at: string;
     asset_url?: string;
     voxel_grid_url?: string;
+    voxel_vis_url?: string;
     radiography_url?: string;
     file_size_bytes?: number;
     generation_time_seconds?: number;

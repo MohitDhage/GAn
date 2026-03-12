@@ -1,0 +1,97 @@
+﻿.venv\Scripts\python.exe : 2026-03-09 
+20:52:53,249 | INFO     | inference | 
+Loading ImageEncoder and Generator onto 
+cuda ...
+At line:1 char:1
++ .venv\Scripts\python.exe 
+diagnose_model.py 2>&1 | Out-File 
+-FilePath  ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~
+    + CategoryInfo          : NotSpecified 
+   : (2026-03-09 20:5...r onto cuda ...:S  
+  tring) [], RemoteException
+    + FullyQualifiedErrorId : NativeComman 
+   dError
+ 
+2026-03-09 20:52:53,411 | INFO     | 
+inference | Autodiscovered latest 
+checkpoints: Epoch 100
+2026-03-09 20:52:53,625 | INFO     | 
+inference | Loaded encoder weights from D:\
+3d_gan_project\checkpoints\encoder_epoch_10
+0.pth
+2026-03-09 20:52:53,693 | INFO     | 
+inference | Loaded generator weights from D
+:\3d_gan_project\checkpoints\generator_epoc
+h_100.pth
+2026-03-09 20:52:53,730 | INFO     | 
+inference | Models loaded and set to eval 
+mode on cuda.
+Device: cuda
+
+Testing with 3 sample images from training data...
+
+--- Image: 0001.png ---
+  Input tensor shape: torch.Size([1, 3, 256, 256])
+  Input tensor range: [-1.9124, 2.5877]
+  Image features shape: torch.Size([1, 256])
+  Image features range: [-29.2310, 30.5624]
+  Generator output shape: torch.Size([1, 1, 64, 64, 64])
+  Scalar field range: [0.000000, 1.000000]
+  Scalar field mean:  0.039799
+  Scalar field std:   0.184533
+  Voxels >= 0.5: 10198/262144 (3.89%)
+  Voxels >= 0.3: 11155/262144 (4.26%)
+  Voxels >= 0.1: 12920/262144 (4.93%)
+  Voxels >= 0.05: 14039/262144 (5.36%)
+  Voxels >= 0.01: 16836/262144 (6.42%)
+
+--- Image: 0002.png ---
+  Input tensor shape: torch.Size([1, 3, 256, 256])
+  Input tensor range: [-2.1179, 1.1872]
+  Image features shape: torch.Size([1, 256])
+  Image features range: [-29.0689, 31.4368]
+  Generator output shape: torch.Size([1, 1, 64, 64, 64])
+  Scalar field range: [0.000000, 1.000000]
+  Scalar field mean:  0.039732
+  Scalar field std:   0.184456
+  Voxels >= 0.5: 10178/262144 (3.88%)
+  Voxels >= 0.3: 11150/262144 (4.25%)
+  Voxels >= 0.1: 12896/262144 (4.92%)
+  Voxels >= 0.05: 13967/262144 (5.33%)
+  Voxels >= 0.01: 16744/262144 (6.39%)
+
+--- Image: 0003.png ---
+  Input tensor shape: torch.Size([1, 3, 256, 256])
+  Input tensor range: [-2.1179, 2.3235]
+  Image features shape: torch.Size([1, 256])
+  Image features range: [-28.8896, 30.4425]
+  Generator output shape: torch.Size([1, 1, 64, 64, 64])
+  Scalar field range: [0.000000, 1.000000]
+  Scalar field mean:  0.039816
+  Scalar field std:   0.184498
+  Voxels >= 0.5: 10192/262144 (3.89%)
+  Voxels >= 0.3: 11166/262144 (4.26%)
+  Voxels >= 0.1: 12967/262144 (4.95%)
+  Voxels >= 0.05: 14069/262144 (5.37%)
+  Voxels >= 0.01: 16888/262144 (6.44%)
+
+
+=== COMPARISON: Without normalization ===
+  Scalar field range (no norm): [0.000000, 1.000000]
+  Scalar field mean (no norm):  0.039173
+  Voxels >= 0.5: 10029/262144 (3.83%)
+  Voxels >= 0.3: 10951/262144 (4.18%)
+  Voxels >= 0.1: 12647/262144 (4.82%)
+  Voxels >= 0.05: 13646/262144 (5.21%)
+
+
+=== Random Image (Sanity Check) ===
+  Scalar field range (random): [0.000000, 1.000000]
+  Scalar field mean (random):  0.039844
+  Voxels >= 0.5: 10205/262144 (3.89%)
+  Voxels >= 0.3: 11183/262144 (4.27%)
+  Voxels >= 0.1: 12976/262144 (4.95%)
+
+=== Diagnosis Complete ===

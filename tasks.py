@@ -330,6 +330,7 @@ def generate_3d_asset(
             latency_seconds=round(wall_elapsed, 3),
             asset_url=result["asset_url"],
             voxel_grid_url=result.get("voxel_grid_url"),
+            voxel_vis_url=result.get("voxel_vis_url"),
             radiography_url=result.get("radiography_url"),
             file_size_bytes=result["file_size_bytes"],
         )

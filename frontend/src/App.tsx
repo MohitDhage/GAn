@@ -134,6 +134,7 @@ function App() {
                   <Viewer3D
                     assetUrl={currentJob.asset_url}
                     voxelGridUrl={currentJob.voxel_grid_url}
+                    voxelVisUrl={currentJob.voxel_vis_url}
                     radiographyUrl={currentJob.radiography_url}
                     jobId={currentJob.job_id}
                     sourceImage={sourceImage || undefined}
